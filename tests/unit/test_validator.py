@@ -247,6 +247,111 @@ def test_merge_nodes_redirects_edges_dedups_and_retires_merged():
     assert set(survived.open_risks) == {"risk-a", "risk-b"}
 
 
+def test_merge_collision_prefers_contradicted_over_supported():
+    """Conservative merge policy: SUPPORTED+CONTRADICTED keeps CONTRADICTED."""
+    v = GraphDeltaValidator()
+    store = CausalClaimGraphStore()
+    a = build_node(label="Alpha", definition="a", type="entity")
+    b = build_node(label="Beta", definition="b", type="entity")
+    c = build_node(label="Gamma", definition="c", type="entity")
+    for n in (a, b, c):
+        store.nodes[n.node_id] = n
+    # Lex-first original id is SUPPORTED so a keep-wins policy would drop CONTRADICTED.
+    e_sup = build_edge(
+        source_node_ids=[a.node_id], target_node_ids=[c.node_id],
+        direction="causal", relation_type="increases",
+    ).model_copy(update={
+        "edge_id": "aaa-supported", "status": EdgeStatus.SUPPORTED, "confidence": 0.9,
+    })
+    e_con = build_edge(
+        source_node_ids=[b.node_id], target_node_ids=[c.node_id],
+        direction="causal", relation_type="increases",
+    ).model_copy(update={
+        "edge_id": "zzz-contradicted", "status": EdgeStatus.CONTRADICTED, "confidence": 0.2,
+        "open_risks": ["conflict"],
+    })
+    store.edges = {e_sup.edge_id: e_sup, e_con.edge_id: e_con}
+    delta = _extract([MergeNodesOp(survivor_node_id=a.node_id, merged_node_id=b.node_id)],
+                     store.base_hash)
+    applied = v.apply(store, delta)
+    survived = next(iter(applied.edges.values()))
+    assert survived.status == EdgeStatus.CONTRADICTED
+    assert survived.confidence == 0.2
+    assert "conflict" in survived.open_risks
+
+
+def test_merge_remaps_experiment_plans_and_evidence_link_target_ids():
+    from src.graph_store import EvidenceLink, EvidenceRole, compute_target_id
+
+    v = GraphDeltaValidator()
+    store = CausalClaimGraphStore()
+    a = build_node(label="Alpha", definition="a", type="entity")
+    b = build_node(label="Beta", definition="b", type="entity")
+    c = build_node(label="Gamma", definition="c", type="entity")
+    for n in (a, b, c):
+        store.nodes[n.node_id] = n
+    edge = build_edge(
+        source_node_ids=[b.node_id], target_node_ids=[c.node_id],
+        direction="causal", relation_type="increases",
+    )
+    store.edges[edge.edge_id] = edge
+    store.experiment_plans[edge.edge_id] = ExperimentPlan(
+        hypothesis_under_test="B causes C", design=ExperimentDesign.ABLATION,
+    )
+    old_target = compute_target_id(edge.edge_id, EvidenceRole.SUPPORT)
+    store.evidence_links = [
+        EvidenceLink(
+            target_id=old_target,
+            verification_task_id="vt-1",
+            evidence_id="E1",
+            evidence_role=EvidenceRole.SUPPORT,
+            retrieval_event_id="r1",
+            committed_transaction_id="tx-1",
+            trust_tier="A",
+        )
+    ]
+    old_id = edge.edge_id
+    applied = v.apply(
+        store,
+        _extract([MergeNodesOp(survivor_node_id=a.node_id, merged_node_id=b.node_id)],
+                 store.base_hash),
+    )
+    new_id = next(iter(applied.edges))
+    assert old_id not in applied.edges
+    assert old_id not in applied.experiment_plans
+    assert new_id in applied.experiment_plans
+    assert applied.evidence_links[0].target_id == compute_target_id(
+        new_id, EvidenceRole.SUPPORT
+    )
+
+
+def test_forged_edge_id_fails_schema_gate():
+    v = GraphDeltaValidator()
+    store = CausalClaimGraphStore()
+    n1 = build_node(label="x", type="construct")
+    n2 = build_node(label="y", type="outcome")
+    store.nodes[n1.node_id] = n1
+    store.nodes[n2.node_id] = n2
+    forged = build_edge(
+        source_node_ids=[n1.node_id], target_node_ids=[n2.node_id],
+        direction="causal", relation_type="increases",
+    ).model_copy(update={"edge_id": "FORGED"})
+    delta = _extract([AddEdgeOp(edge=forged)], store.base_hash)
+    decision = v.evaluate(store, delta)
+    assert decision.schema is False
+    assert decision.failing_gate == "schema"
+
+
+def test_forged_node_id_fails_schema_gate():
+    v = GraphDeltaValidator()
+    store = CausalClaimGraphStore()
+    forged = build_node(label="z", type="construct").model_copy(update={"node_id": "FORGED-NODE"})
+    delta = _extract([AddNodeOp(node=forged)], store.base_hash)
+    decision = v.evaluate(store, delta)
+    assert decision.schema is False
+    assert decision.failing_gate == "schema"
+
+
 # --- Δ^hypothesis routes through the Operation union ------------------------------------
 def test_hypothesis_applies_via_the_operation_union_landing_unverified():
     v = GraphDeltaValidator()

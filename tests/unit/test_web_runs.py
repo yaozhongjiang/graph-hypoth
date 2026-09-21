@@ -118,7 +118,8 @@ def test_browser_confirmation_parks_the_worker_until_the_selection_arrives(tmp_p
 
 
 def test_an_interactive_profile_policy_uses_the_browser_gate_by_itself(tmp_path):
-    profile = tmp_path / "profile.yaml"
+    profile = tmp_path / "web" / "profile.yaml"
+    profile.parent.mkdir(parents=True, exist_ok=True)
     profile.write_text("claim: x causes y\nconfirm:\n  mode: interactive\n", encoding="utf-8")
     pipeline = FakePipeline(surfaced=("h1",))
     manager = _manager(tmp_path, pipeline)
@@ -211,11 +212,13 @@ def test_restart_marks_records_that_were_in_progress_as_interrupted(tmp_path):
 
 
 def test_import_registers_an_existing_run_directory_and_survives_restart(tmp_path):
-    external = tmp_path / "cli-run"
-    write_minimal_artifacts(external)
     manager = _manager(tmp_path, FakePipeline())
+    external = tmp_path / "web" / "cli-run"
+    write_minimal_artifacts(external)
     with pytest.raises(FileNotFoundError):
-        manager.import_run(tmp_path / "nowhere")
+        manager.import_run(tmp_path / "web" / "nowhere")
+    with pytest.raises(PermissionError, match="allowed roots"):
+        manager.import_run(tmp_path / "secrets-outside")
 
     record = manager.import_run(external)
 
@@ -230,12 +233,15 @@ def test_import_registers_an_existing_run_directory_and_survives_restart(tmp_pat
 
 def test_launch_rejects_missing_files_and_unloadable_profiles(tmp_path):
     manager = _manager(tmp_path, FakePipeline())
+    root = tmp_path / "web"
 
     with pytest.raises(FileNotFoundError, match="profile file does not exist"):
-        manager.launch(profile_path=tmp_path / "missing.yaml", config_path=CONFIG)
+        manager.launch(profile_path=root / "missing.yaml", config_path=CONFIG)
     with pytest.raises(FileNotFoundError, match="config file does not exist"):
-        manager.launch(profile_path=PROFILE, config_path=tmp_path / "missing.yaml")
-    bad = tmp_path / "bad.yaml"
+        manager.launch(profile_path=PROFILE, config_path=root / "missing.yaml")
+    with pytest.raises(PermissionError, match="allowed roots"):
+        manager.launch(profile_path=tmp_path / "outside.yaml", config_path=CONFIG)
+    bad = root / "bad.yaml"
     bad.write_text("claim: x\nnot_a_field: 1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="profile could not be loaded"):
         manager.launch(profile_path=bad, config_path=CONFIG)
@@ -279,7 +285,7 @@ def test_candidate_row_projects_the_candidate_for_the_browser():
 
 def test_resolve_file_refuses_paths_outside_the_run_directory(tmp_path):
     manager = _manager(tmp_path, FakePipeline())
-    external = tmp_path / "cli-run"
+    external = tmp_path / "web" / "cli-run"
     write_minimal_artifacts(external)
     record = manager.import_run(external)
 

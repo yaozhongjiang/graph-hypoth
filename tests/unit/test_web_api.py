@@ -121,16 +121,39 @@ def test_confirmation_flow_over_http(tmp_path):
 def test_launch_validation_and_import(tmp_path):
     client = _client(tmp_path, FakePipeline())
 
-    missing = client.post("/api/runs", json={"profile_path": "nope.yaml", "config_path": CONFIG})
+    missing = client.post(
+        "/api/runs",
+        json={"profile_path": "examples/nope-missing.yaml", "config_path": CONFIG},
+    )
     assert missing.status_code == 400 and "does not exist" in missing.json()["detail"]
     assert client.post("/api/runs", json={"config_path": CONFIG}).status_code == 422
 
-    external = tmp_path / "cli-run"
+    # Imports must stay under an allowed root (runs_root / examples / config / runtime_artifacts).
+    external = tmp_path / "web" / "cli-run"
     write_minimal_artifacts(external)
     imported = client.post("/api/runs/import", json={"run_dir": str(external)})
     assert imported.status_code == 201 and imported.json()["status"] == "imported"
     run_id = imported.json()["run_id"]
     assert client.get(f"/api/runs/{run_id}/graph").json()["seed"] == "seed"
     assert client.get(f"/api/runs/{run_id}/events").json() == {"events": [], "next": 0}
-    nowhere = client.post("/api/runs/import", json={"run_dir": str(tmp_path / "nowhere")})
+    nowhere = client.post("/api/runs/import", json={"run_dir": str(tmp_path / "web" / "nowhere")})
     assert nowhere.status_code == 400
+
+    outside = tmp_path / "secrets"
+    write_minimal_artifacts(outside)
+    (outside / "credentials.env").write_text("SECRET=hunter2\n", encoding="utf-8")
+    denied = client.post("/api/runs/import", json={"run_dir": str(outside)})
+    assert denied.status_code == 403
+    assert "allowed roots" in denied.json()["detail"]
+
+
+def test_launch_rejects_profile_outside_allowed_roots(tmp_path):
+    client = _client(tmp_path, FakePipeline())
+    evil = tmp_path / "evil-profile.yaml"
+    evil.write_text("seed_claim: x\n", encoding="utf-8")
+    denied = client.post(
+        "/api/runs",
+        json={"profile_path": str(evil), "config_path": CONFIG},
+    )
+    assert denied.status_code == 403
+    assert "allowed roots" in denied.json()["detail"]

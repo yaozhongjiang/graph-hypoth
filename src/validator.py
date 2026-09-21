@@ -24,11 +24,14 @@ from src.delta import (
     VERDICT_TO_STATUS,
     VerifyPayload,
     compute_edge_id,
+    compute_node_id,
 )
 from src.graph_store import (
     CausalClaimGraphStore,
     CausalEdge,
     EdgeStatus,
+    ExperimentPlan,
+    compute_target_id,
 )
 
 _FAMILY_PAYLOAD = {
@@ -53,6 +56,17 @@ _ALLOWED_VERIFY_TRANSITIONS: dict[EdgeStatus, frozenset[EdgeStatus]] = {
     EdgeStatus.CONTRADICTED: frozenset(),
     EdgeStatus.QUALIFIED: frozenset(),
     EdgeStatus.NOT_CAUSAL: frozenset(),
+}
+
+# Higher rank wins on merge collision: prefer the more conservative settled verdict so a
+# SUPPORTED+CONTRADICTED collapse cannot erase the contradiction.
+_STATUS_CONSERVATISM: dict[EdgeStatus, int] = {
+    EdgeStatus.UNVERIFIED: 0,
+    EdgeStatus.SUPPORTED: 1,
+    EdgeStatus.INSUFFICIENT: 2,
+    EdgeStatus.QUALIFIED: 3,
+    EdgeStatus.NOT_CAUSAL: 4,
+    EdgeStatus.CONTRADICTED: 5,
 }
 
 _GATE_ORDER = ("schema", "refs", "base_hash", "allowed_transition", "idempotent")
@@ -119,7 +133,8 @@ class GraphDeltaValidator:
 
         For a priority delta, 1_schema also enforces the ``[0,1]`` priority scale so a raw
         ``PriorityPayload`` that bypasses the authoring annotation is still rejected, never
-        applied.
+        applied. Extract and hypothesis operations must carry content-addressed node/edge
+        ids (``compute_node_id`` / ``compute_edge_id``).
         """
         payload = delta.payload
         if not isinstance(payload, _FAMILY_PAYLOAD[delta.family]):
@@ -130,6 +145,9 @@ class GraphDeltaValidator:
             if len(payload.node_or_edge_ids) != len(payload.priority_values):
                 return False
             return all(0.0 <= value <= 1.0 for value in payload.priority_values)
+        operations = _operations_of(payload)
+        if operations is not None:
+            return _content_addressed_operations(operations)
         return True
 
     def _gate_refs(self, store: CausalClaimGraphStore, delta: GraphDeltaProposal) -> bool:
@@ -259,8 +277,10 @@ class GraphDeltaValidator:
 
         # 1 + 4. redirect every edge off merged_id, recompute its content-addressed id, and
         # de-dup colliding ids. Iterating in ascending original-edge_id order makes the
-        # first survivor of a collision the lexicographically smaller one.
-        redirected: dict[str, "CausalEdge"] = {}
+        # first survivor of a collision the lexicographically smaller one before the
+        # conservative status policy in ``_union_edge_lists`` may prefer the other scalars.
+        redirected: dict[str, CausalEdge] = {}
+        id_map: dict[str, str] = {}
         for original_id in sorted(store.edges):
             edge = store.edges[original_id]
             src = [survivor_id if x == merged_id else x for x in edge.source_node_ids]
@@ -269,11 +289,13 @@ class GraphDeltaValidator:
             moved = edge.model_copy(
                 update={"edge_id": new_id, "source_node_ids": src, "target_node_ids": tgt}
             )
+            id_map[original_id] = new_id
             if new_id in redirected:
                 redirected[new_id] = _union_edge_lists(redirected[new_id], moved)
             else:
                 redirected[new_id] = moved
         store.edges = redirected
+        _remap_edge_dependents(store, id_map)
 
         # 3. retire merged node (lineage preserved in survivor.provenance).
         del store.nodes[merged_id]
@@ -290,12 +312,87 @@ def _operations_of(payload) -> list[AddNodeOp | AddEdgeOp | MergeNodesOp] | None
     return None
 
 
+def _content_addressed_operations(operations: list[AddNodeOp | AddEdgeOp | MergeNodesOp]) -> bool:
+    """Reject forged node/edge ids that are not the content-addressed hash of their fields."""
+    for op in operations:
+        if isinstance(op, AddNodeOp):
+            node = op.node
+            if node.node_id != compute_node_id(node.type, node.label, node.definition):
+                return False
+        elif isinstance(op, AddEdgeOp):
+            edge = op.edge
+            if edge.edge_id != compute_edge_id(
+                edge.source_node_ids, edge.target_node_ids, edge.direction, edge.relation_type
+            ):
+                return False
+    return True
+
+
+def _remap_edge_dependents(store: CausalClaimGraphStore, id_map: dict[str, str]) -> None:
+    """Rewrite ``experiment_plans`` keys and ``evidence_links.target_id`` after edge-id remap.
+
+    Plan collisions (two old edges collapse to one id) keep the plan from the
+    lexicographically smaller original edge id. Links whose ``target_id`` matches
+    ``compute_target_id(old_id, role)`` are rewritten to the new edge id.
+    """
+    if any(old != new for old, new in id_map.items()):
+        remapped_plans: dict[str, ExperimentPlan] = {}
+        claimed_by: dict[str, str] = {}
+        for old_id in sorted(store.experiment_plans):
+            plan = store.experiment_plans[old_id]
+            new_id = id_map.get(old_id, old_id)
+            prior = claimed_by.get(new_id)
+            if prior is not None and prior < old_id:
+                continue  # keep plan from the smaller original key
+            remapped_plans[new_id] = plan
+            claimed_by[new_id] = old_id
+        store.experiment_plans = remapped_plans
+
+        new_links = []
+        for link in store.evidence_links:
+            updated = link
+            for old_id, new_id in id_map.items():
+                if old_id == new_id:
+                    continue
+                if link.target_id == compute_target_id(old_id, link.evidence_role):
+                    updated = link.model_copy(
+                        update={"target_id": compute_target_id(new_id, link.evidence_role)}
+                    )
+                    break
+            new_links.append(updated)
+        store.evidence_links = new_links
+
+
+def _more_conservative_edge(left: CausalEdge, right: CausalEdge) -> CausalEdge:
+    """Return the edge whose status/confidence should win a merge collision."""
+    left_rank = _STATUS_CONSERVATISM[left.status]
+    right_rank = _STATUS_CONSERVATISM[right.status]
+    if right_rank > left_rank:
+        return right
+    if left_rank > right_rank:
+        return left
+    # Same status: prefer the lower confidence (more conservative); None loses to a number.
+    left_conf = left.confidence
+    right_conf = right.confidence
+    if left_conf is None and right_conf is not None:
+        return right
+    if right_conf is None and left_conf is not None:
+        return left
+    if left_conf is not None and right_conf is not None and right_conf < left_conf:
+        return right
+    return left
+
+
 def _union_edge_lists(keep: CausalEdge, other: CausalEdge) -> CausalEdge:
-    """Merge two edges that collapsed to one canonical id: keep ``keep``'s scalars, union
-    list-valued fields. ``CausalEdge`` carries no provenance field, so edge provenance is not
+    """Merge two edges that collapsed to one canonical id.
+
+    List-valued fields are unioned. Scalar fields (status, confidence, mechanism) come from
+    the more conservative edge so a SUPPORTED+CONTRADICTED collision cannot drop the
+    contradiction. ``CausalEdge`` carries no provenance field, so edge provenance is not
     merged here.
     """
-    return keep.model_copy(
+    winner = _more_conservative_edge(keep, other)
+    return winner.model_copy(
         update={
             "open_risks": sorted(set(keep.open_risks) | set(other.open_risks)),
             "confounders": sorted(set(keep.confounders) | set(other.confounders)),

@@ -12,6 +12,7 @@ from src.paper_titles import (
     fetch_pdf_bytes,
     looks_like_pdf_url,
     pdf_pages_text,
+    safe_urlopen,
     strip_markup,
 )
 from src.retrieval._util import get_attr_or_key as _get
@@ -99,7 +100,7 @@ def _fetch_jats_text(
     if _blocked_fetch_host(url):
         raise ValueError("JATS full-text host is not allowed")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    open_url = opener or urllib.request.urlopen
+    open_url = opener or safe_urlopen
     with open_url(request, timeout=timeout) as response:
         raw = response.read(max_bytes + 1)
     # Measure the cap in bytes: a custom str-returning opener would make len()

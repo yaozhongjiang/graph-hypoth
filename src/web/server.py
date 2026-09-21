@@ -57,12 +57,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    from src.web.runs import RunManager
+    from src.web.runs import RunManager, is_loopback_host
 
     manager = RunManager(args.runs_root, quiet=args.quiet)
     app = create_app(manager)
     url = f"http://{args.host}:{args.port}/"
     print(f"GraphHypoth web app at {url} (runs are saved under {manager.runs_root})", flush=True)
+    if not is_loopback_host(args.host):
+        print(
+            "WARNING: bound beyond loopback — the API has no authentication. "
+            "Profiles/configs/imports are sandboxed to runs_root plus cwd "
+            "examples/, config/, and runtime_artifacts/, but anyone who can "
+            "reach this host can still list runs, start jobs from those roots, "
+            "and read imported artifacts. Prefer --host 127.0.0.1.",
+            file=sys.stderr,
+            flush=True,
+        )
     if not args.no_browser:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import urllib.request
 from typing import Any
 
 import pytest
@@ -120,6 +121,37 @@ def test_fetch_pdf_bytes_is_bounded_to_allowed_http_pdf_urls() -> None:
 
     with pytest.raises(ValueError, match="not allowed"):
         fetch_pdf_bytes("http://127.0.0.1/private.pdf", opener=fail_opener)
+
+
+def test_blocked_fetch_host_rejects_internal_and_local_suffixes() -> None:
+    from src.paper_titles import _blocked_fetch_host
+
+    assert _blocked_fetch_host("http://metadata.google.internal/latest") is True
+    assert _blocked_fetch_host("http://service.internal/x") is True
+    assert _blocked_fetch_host("http://printer.local/x") is True
+    assert _blocked_fetch_host("http://nodot/x") is True
+    assert _blocked_fetch_host("https://example.com/paper.pdf") is False
+
+
+def test_safe_urlopen_refuses_redirect_to_blocked_host() -> None:
+    from src.paper_titles import _SafeRedirectHandler, _blocked_fetch_host
+
+    handler = _SafeRedirectHandler()
+    request = urllib.request.Request("https://example.com/paper.pdf")
+
+    class _Fp:
+        pass
+
+    with pytest.raises(ValueError, match="redirect target is not allowed"):
+        handler.redirect_request(
+            request,
+            _Fp(),
+            302,
+            "Found",
+            {},
+            "http://metadata.google.internal/latest",
+        )
+    assert _blocked_fetch_host("http://metadata.google.internal/latest") is True
 
 
 def test_fetch_pdf_bytes_reads_pdf_response() -> None:

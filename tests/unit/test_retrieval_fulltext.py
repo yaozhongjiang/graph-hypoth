@@ -77,7 +77,7 @@ def test_detect_oa_prefers_jats_url() -> None:
     result = SourceResult(
         source="europepmc",
         title="t",
-        metadata={"jats_fulltext_url": "https://ebi/x/fullTextXML", "is_oa": True},
+        metadata={"jats_fulltext_url": "https://www.ebi.ac.uk/x/fullTextXML", "is_oa": True},
     )
     info = detect_oa(result)
     assert info is not None and info.kind == "jats"
@@ -106,7 +106,7 @@ def test_fetch_oa_fulltext_extracts_jats_body_text() -> None:
     result = SourceResult(
         source="europepmc",
         title="t",
-        metadata={"jats_fulltext_url": "https://ebi/x/fullTextXML", "is_oa": True},
+        metadata={"jats_fulltext_url": "https://www.ebi.ac.uk/x/fullTextXML", "is_oa": True},
     )
 
     captured: dict = {}
@@ -161,7 +161,7 @@ def test_fetch_oa_fulltext_is_best_effort_on_transport_error() -> None:
     result = SourceResult(
         source="europepmc",
         title="t",
-        metadata={"jats_fulltext_url": "https://ebi/x/fullTextXML", "is_oa": True},
+        metadata={"jats_fulltext_url": "https://www.ebi.ac.uk/x/fullTextXML", "is_oa": True},
     )
 
     assert fetch_oa_fulltext(result, _config(), opener=failing_opener) is None
@@ -172,7 +172,7 @@ def test_fetch_oa_fulltext_enforces_max_bytes() -> None:
     result = SourceResult(
         source="europepmc",
         title="t",
-        metadata={"jats_fulltext_url": "https://ebi/x/fullTextXML", "is_oa": True},
+        metadata={"jats_fulltext_url": "https://www.ebi.ac.uk/x/fullTextXML", "is_oa": True},
     )
 
     assert fetch_oa_fulltext(result, _config(max_bytes=4), opener=_opener(big)) is None
@@ -188,7 +188,7 @@ def test_fetch_oa_fulltext_includes_abstract_and_body() -> None:
     result = SourceResult(
         source="europepmc",
         title="t",
-        metadata={"jats_fulltext_url": "https://ebi/x/fullTextXML", "is_oa": True},
+        metadata={"jats_fulltext_url": "https://www.ebi.ac.uk/x/fullTextXML", "is_oa": True},
     )
 
     text = fetch_oa_fulltext(result, _config(), opener=_opener(jats))
@@ -211,7 +211,7 @@ def test_fetch_oa_fulltext_returns_none_when_only_front_metadata() -> None:
     result = SourceResult(
         source="europepmc",
         title="t",
-        metadata={"jats_fulltext_url": "https://ebi/x/fullTextXML", "is_oa": True},
+        metadata={"jats_fulltext_url": "https://www.ebi.ac.uk/x/fullTextXML", "is_oa": True},
     )
 
     assert fetch_oa_fulltext(result, _config(), opener=_opener(jats)) is None
@@ -225,7 +225,7 @@ def test_fetch_oa_fulltext_enforces_max_bytes_for_str_opener() -> None:
     result = SourceResult(
         source="europepmc",
         title="t",
-        metadata={"jats_fulltext_url": "https://ebi/x/fullTextXML", "is_oa": True},
+        metadata={"jats_fulltext_url": "https://www.ebi.ac.uk/x/fullTextXML", "is_oa": True},
     )
 
     assert fetch_oa_fulltext(result, _config(max_bytes=6), opener=_opener(payload)) is None
