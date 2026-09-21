@@ -28,6 +28,9 @@ IMPORTS_FILE = "imports.json"
 ACTIVE_STATUSES = frozenset({"queued", "running", "waiting_confirmation"})
 MAX_OUTPUT_LINES = 400
 MAX_EVENTS_PER_PAGE = 500
+# Paths the unauthenticated local API may read for launch/import. Anything outside
+# these roots is rejected so a mis-bound host cannot turn the API into arbitrary LFI.
+_ALLOWED_PATH_ROOT_NAMES: tuple[str, ...] = ("examples", "config", "runtime_artifacts")
 # The roles a complete run may build a model backend for (see ``run_synthesist``).
 WORKFLOW_ROLES: tuple[str, ...] = (
     "builder",
@@ -96,6 +99,26 @@ def _now() -> str:
 
 def _new_run_id() -> str:
     return f"{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:6]}"
+
+
+def path_is_under(path: Path, root: Path) -> bool:
+    """True when ``path`` is ``root`` or a descendant (after resolve)."""
+    resolved = path.expanduser().resolve()
+    base = root.expanduser().resolve()
+    return resolved == base or base in resolved.parents
+
+
+def is_loopback_host(host: str) -> bool:
+    """True for bind addresses that stay on the local machine."""
+    lowered = (host or "").strip().lower()
+    if lowered in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address(lowered).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass
@@ -312,6 +335,26 @@ class RunManager:
         self._config_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._load_existing()
 
+    def allowed_path_roots(self) -> list[Path]:
+        """Directories the API may read for profiles, configs, and imported run dirs."""
+        roots = [self.runs_root]
+        cwd = Path.cwd().resolve()
+        for name in _ALLOWED_PATH_ROOT_NAMES:
+            candidate = (cwd / name).resolve()
+            if candidate not in roots:
+                roots.append(candidate)
+        return roots
+
+    def ensure_allowed_path(self, path: Path, *, kind: str) -> Path:
+        """Resolve ``path`` and refuse anything outside ``allowed_path_roots``."""
+        resolved = Path(path).expanduser().resolve()
+        if not any(path_is_under(resolved, root) for root in self.allowed_path_roots()):
+            allowed = ", ".join(str(root) for root in self.allowed_path_roots())
+            raise PermissionError(
+                f"{kind} path escapes the allowed roots ({allowed}): {resolved}"
+            )
+        return resolved
+
     # --- persistence -----------------------------------------------------------------------
     def _load_existing(self) -> None:
         for record_path in sorted(self.runs_root.glob(f"*/{RECORD_FILE}")):
@@ -456,6 +499,8 @@ class RunManager:
         """
         profile_path = Path(profile_path).expanduser().resolve()
         config_path = Path(config_path).expanduser().resolve()
+        profile_path = self.ensure_allowed_path(profile_path, kind="profile")
+        config_path = self.ensure_allowed_path(config_path, kind="config")
         if not profile_path.is_file():
             raise FileNotFoundError(f"profile file does not exist: {profile_path}")
         if not config_path.is_file():
@@ -587,8 +632,13 @@ class RunManager:
 
     # --- imports ---------------------------------------------------------------------------
     def import_run(self, run_dir: Path) -> RunRecord:
-        """Register an existing run directory (a CLI run, say) so its graph and pages can be browsed."""
-        run_dir = Path(run_dir).expanduser().resolve()
+        """Register an existing run directory (a CLI run, say) so its graph and pages can be browsed.
+
+        The directory must lie under an allowed root (``runs_root``, or cwd
+        ``examples`` / ``config`` / ``runtime_artifacts``) so the unauthenticated
+        files API cannot be pointed at arbitrary filesystem trees.
+        """
+        run_dir = self.ensure_allowed_path(Path(run_dir), kind="import")
         graph_path = run_dir / "graph.json"
         if not graph_path.is_file():
             raise FileNotFoundError(f"no graph.json under {run_dir}")

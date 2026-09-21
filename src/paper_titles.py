@@ -205,16 +205,34 @@ def pdf_url_from_values(*values: str | None) -> str | None:
 
 
 def _blocked_fetch_host(url: str) -> bool:
-    host = urlsplit(url).hostname
+    """Return True when ``url`` must not be fetched (SSRF / non-public target).
+
+    Blocks loopback/private/link-local IP literals, localhost names, non-public
+    DNS suffixes (``.internal``, ``.local``, …), hostnames without a dot, and
+    hostnames that resolve only to non-public addresses. Aligns with the public
+    domain rules used by Codex web retrieval.
+    """
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return True
     if not host:
         return True
-    lowered = host.lower()
-    if lowered in {"localhost", "localhost.localdomain"}:
+    lowered = host.lower().rstrip(".")
+    if lowered in {"localhost", "localhost.localdomain"} or lowered.endswith(
+        (".local", ".localhost", ".internal", ".home.arpa")
+    ):
+        return True
+    if "." not in lowered:
         return True
     try:
         address = ipaddress.ip_address(lowered)
     except ValueError:
-        return False
+        return _hostname_resolves_non_public(lowered)
+    return _ip_is_non_public(address)
+
+
+def _ip_is_non_public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return (
         address.is_loopback
         or address.is_private
@@ -223,6 +241,46 @@ def _blocked_fetch_host(url: str) -> bool:
         or address.is_reserved
         or address.is_unspecified
     )
+
+
+def _hostname_resolves_non_public(hostname: str) -> bool:
+    """True when DNS resolves to any non-public address.
+
+    Unresolved names are not blocked here (transport fails later); this catches
+    public-looking hostnames that point at loopback/private/link-local targets.
+    """
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except OSError:
+        return False
+    for info in infos:
+        raw = info[4][0]
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if _ip_is_non_public(address):
+            return True
+    return False
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-check each redirect hop with ``_blocked_fetch_host`` before following."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        if _blocked_fetch_host(newurl):
+            raise ValueError("redirect target is not allowed")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_urlopen(request: urllib.request.Request, timeout: float = 10.0):
+    """``urlopen`` that refuses blocked hosts on the initial URL and on redirects."""
+    if _blocked_fetch_host(request.full_url):
+        raise ValueError("fetch target is not allowed")
+    opener = urllib.request.build_opener(_SafeRedirectHandler)
+    return opener.open(request, timeout=timeout)
 
 
 def fetch_pdf_bytes(
@@ -240,7 +298,7 @@ def fetch_pdf_bytes(
         url,
         headers={"User-Agent": f"{USER_AGENT} PDF-title-resolver"},
     )
-    open_url = opener or urllib.request.urlopen
+    open_url = opener or safe_urlopen
     with open_url(request, timeout=timeout_seconds) as response:
         chunks: list[bytes] = []
         total = 0

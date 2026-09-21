@@ -42,6 +42,32 @@ def test_window_match_returns_source_text_sentence() -> None:
     )
 
 
+def test_window_match_rejects_meaning_changing_paraphrases() -> None:
+    cases = [
+        (
+            "models compress text efficiently today",
+            "Vision models compress images efficiently today. Language models are different.",
+        ),
+        (
+            "language models learn representations",
+            "Vision models learn representations from pixels. Separate work studies language.",
+        ),
+        (
+            "mortality declined among patients",
+            "Mortality declined among adults. Pediatric rates were unchanged.",
+        ),
+        (
+            "treatment increases survival rates substantially",
+            "Treatment decreases survival rates substantially in this cohort.",
+        ),
+    ]
+    for candidate, source in cases:
+        result = verify_candidate_excerpt(candidate_excerpt=candidate, source_text=source)
+        assert result.verification_status == "rejected", candidate
+        assert result.match_type == "not_found"
+        assert result.verified_quote is None
+
+
 def test_stitched_locator_is_rejected() -> None:
     result = verify_candidate_excerpt(
         candidate_excerpt="Compression improves [ ... ] over baselines.",

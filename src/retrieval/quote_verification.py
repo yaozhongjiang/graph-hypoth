@@ -101,17 +101,21 @@ def _best_sentence_window(candidate: str, source: str) -> str | None:
         return None
     sentences = _sentences(source)
     best: tuple[float, int, str] | None = None
-    for start in range(len(sentences)):
-        for count in range(1, min(3, len(sentences) - start) + 1):
-            window = _clean(" ".join(sentences[start : start + count]))
-            window_norm = _normalize(window)
-            if _missing_term_count(candidate_norm, window_norm) > 1:
-                continue
-            ratio = SequenceMatcher(None, candidate_norm, window_norm).ratio()
-            shared = _shared_term_count(candidate_norm, window_norm)
-            score = ratio + min(shared, 8) * 0.05
-            if best is None or score > best[0]:
-                best = (score, -count, window)
+    # Single-sentence windows only: multi-sentence joins can assemble candidate terms
+    # from unrelated sentences (e.g. "language" + "models learn representations").
+    for sentence in sentences:
+        window = _clean(sentence)
+        window_norm = _normalize(window)
+        # Every candidate term must appear in the window so a single swapped
+        # content word (text/images, patients/adults, increases/decreases) cannot
+        # pass as an accepted paraphrase.
+        if _missing_term_count(candidate_norm, window_norm) != 0:
+            continue
+        ratio = SequenceMatcher(None, candidate_norm, window_norm).ratio()
+        shared = _shared_term_count(candidate_norm, window_norm)
+        score = ratio + min(shared, 8) * 0.05
+        if best is None or score > best[0]:
+            best = (score, 0, window)
     if best is None or best[0] < 0.72:
         return None
     return best[2]

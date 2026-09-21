@@ -155,6 +155,8 @@ def create_app(manager: RunManager) -> FastAPI:
             )
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except RunBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return record.to_json()
@@ -165,6 +167,8 @@ def create_app(manager: RunManager) -> FastAPI:
             record = manager.import_run(Path(body.run_dir))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         return record.to_json()
 
     @app.get("/api/runs/{run_id}")
